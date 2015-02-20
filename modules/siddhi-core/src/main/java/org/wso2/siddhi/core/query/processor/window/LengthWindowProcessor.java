@@ -1,136 +1,116 @@
 /*
-*  Copyright (c) 2005-2010, WSO2 Inc. (http://www.wso2.org) All Rights Reserved.
-*
-*  WSO2 Inc. licenses this file to you under the Apache License,
-*  Version 2.0 (the "License"); you may not use this file except
-*  in compliance with the License.
-*  You may obtain a copy of the License at
-*
-*    http://www.apache.org/licenses/LICENSE-2.0
-*
-* Unless required by applicable law or agreed to in writing,
-* software distributed under the License is distributed on an
-* "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-* KIND, either express or implied.  See the License for the
-* specific language governing permissions and limitations
-* under the License.
-*/
+ * Copyright (c) 2005 - 2015, WSO2 Inc. (http://www.wso2.org) All Rights Reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy
+ * of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software distributed
+ * under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
+ * CONDITIONS OF ANY KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations under the License.
+ */
 package org.wso2.siddhi.core.query.processor.window;
 
-import org.wso2.siddhi.core.config.SiddhiContext;
-import org.wso2.siddhi.core.event.Event;
-import org.wso2.siddhi.core.event.StreamEvent;
-import org.wso2.siddhi.core.event.in.InEvent;
-import org.wso2.siddhi.core.event.in.InListEvent;
-import org.wso2.siddhi.core.event.remove.RemoveEvent;
-import org.wso2.siddhi.core.query.QueryPostProcessingElement;
-import org.wso2.siddhi.core.util.collection.queue.ISiddhiQueue;
-import org.wso2.siddhi.core.util.collection.queue.SiddhiQueue;
-import org.wso2.siddhi.core.util.collection.queue.SiddhiQueueGrid;
-import org.wso2.siddhi.query.api.definition.AbstractDefinition;
+import org.wso2.siddhi.core.config.ExecutionPlanContext;
+import org.wso2.siddhi.core.event.ComplexEvent;
+import org.wso2.siddhi.core.event.ComplexEventChunk;
+import org.wso2.siddhi.core.event.MetaComplexEvent;
+import org.wso2.siddhi.core.event.stream.StreamEvent;
+import org.wso2.siddhi.core.event.stream.StreamEventCloner;
+import org.wso2.siddhi.core.executor.ConstantExpressionExecutor;
+import org.wso2.siddhi.core.executor.ExpressionExecutor;
+import org.wso2.siddhi.core.executor.VariableExpressionExecutor;
+import org.wso2.siddhi.core.query.processor.Processor;
+import org.wso2.siddhi.core.table.EventTable;
+import org.wso2.siddhi.core.util.finder.Finder;
+import org.wso2.siddhi.core.util.parser.SimpleFinderParser;
 import org.wso2.siddhi.query.api.expression.Expression;
-import org.wso2.siddhi.query.api.expression.constant.IntConstant;
 
-import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
 
-public class LengthWindowProcessor extends WindowProcessor {
+public class LengthWindowProcessor extends WindowProcessor implements FindableProcessor {
 
-    private int lengthToKeep;
-    private ISiddhiQueue<StreamEvent> window;
+    private int length;
+    private int count = 0;
+    private ComplexEventChunk<StreamEvent> expiredEventChunk;
 
-    @Override
-    protected void processEvent(InEvent event) {
-        acquireLock();
-        try {
-            window.put(new RemoveEvent(event, Long.MAX_VALUE));
-            if (window.size() > lengthToKeep) {
-                nextProcessor.process((Event) window.poll());
-            }
-            nextProcessor.process(event);
-        } finally {
-            releaseLock();
-        }
+    public int getLength() {
+        return length;
+    }
 
+    public void setLength(int length) {
+        this.length = length;
     }
 
     @Override
-    protected void processEvent(InListEvent listEvent) {
-        acquireLock();
-        try {
-            int toFullQueueSize = (lengthToKeep - window.size());
-            if (listEvent.getActiveEvents() > toFullQueueSize) {
-                InEvent[] newEvents = new InEvent[toFullQueueSize];
-                int index = 0;
-                for (int i = 0; i < listEvent.getActiveEvents(); i++) {
-                    InEvent inEvent = (InEvent) listEvent.getEvent(i);
-                    if (index < toFullQueueSize - 1) {
-                        newEvents[index] = inEvent;
-                        window.put(new RemoveEvent(inEvent, Long.MAX_VALUE));
-                        index++;
-                    } else if (index == toFullQueueSize - 1) {
-                        newEvents[index] = inEvent;
-                        window.put(new RemoveEvent(inEvent, Long.MAX_VALUE));
-                        index++;
-                        nextProcessor.process(new InListEvent(newEvents));
-                    } else {
-                        RemoveEvent removeEvent = (RemoveEvent) window.poll();
-                        removeEvent.setExpiryTime(System.currentTimeMillis());
-                        nextProcessor.process(removeEvent);
-                        window.put(new RemoveEvent(inEvent, Long.MAX_VALUE));
-                        nextProcessor.process(inEvent);
-                    }
-                }
+    protected void init(ExpressionExecutor[] attributeExpressionExecutors, ExecutionPlanContext executionPlanContext) {
+        expiredEventChunk = new ComplexEventChunk<StreamEvent>();
+
+        if (attributeExpressionExecutors != null) {
+            length = (Integer) ((ConstantExpressionExecutor) attributeExpressionExecutors[0]).getValue();
+        }
+    }
+
+    @Override
+    protected void process(ComplexEventChunk<StreamEvent> streamEventChunk, Processor nextProcessor, StreamEventCloner streamEventCloner) {
+        while (streamEventChunk.hasNext()) {
+            StreamEvent streamEvent = streamEventChunk.next();
+            StreamEvent clonedEvent = streamEventCloner.copyStreamEvent(streamEvent);
+            clonedEvent.setType(StreamEvent.Type.EXPIRED);
+            if (count < length) {
+                count++;
+                this.expiredEventChunk.add(clonedEvent);
             } else {
-                for (int i = 0; i < listEvent.getActiveEvents(); i++) {
-                    window.put(new RemoveEvent(listEvent.getEvent(i), Long.MAX_VALUE));
-                }
-                nextProcessor.process(listEvent);
+                StreamEvent firstEvent = this.expiredEventChunk.poll();
+                streamEventChunk.insertBeforeCurrent(firstEvent);
+                this.expiredEventChunk.add(clonedEvent);
             }
-        } finally {
-            releaseLock();
         }
-
+        nextProcessor.process(streamEventChunk);
     }
 
     @Override
-    public Iterator<StreamEvent> iterator() {
-        return window.iterator();
-    }
-
-    @Override
-    public Iterator<StreamEvent> iterator(String predicate) {
-        if (siddhiContext.isDistributedProcessingEnabled()) {
-            return ((SiddhiQueueGrid<StreamEvent>) window).iterator(predicate);
-        } else {
-            return window.iterator();
+    public StreamEvent find(ComplexEvent matchingEvent, Finder finder) {
+        finder.setMatchingEvent(matchingEvent);
+        ComplexEventChunk<StreamEvent> returnEventChunk = new ComplexEventChunk<StreamEvent>();
+        expiredEventChunk.reset();
+        while (expiredEventChunk.hasNext()) {
+            StreamEvent streamEvent = expiredEventChunk.next();
+            if (finder.execute(streamEvent)) {
+                returnEventChunk.add(streamEventCloner.copyStreamEvent(streamEvent));
+            }
         }
+        finder.setMatchingEvent(null);
+        return returnEventChunk.getFirst();
     }
 
     @Override
-    protected Object[] currentState() {
-        return window.currentState();
+    public Finder constructFinder(Expression expression, MetaComplexEvent metaComplexEvent, ExecutionPlanContext executionPlanContext, List<VariableExpressionExecutor> variableExpressionExecutors, Map<String, EventTable> eventTableMap, int matchingStreamIndex) {
+        return SimpleFinderParser.parse(expression, metaComplexEvent, executionPlanContext, variableExpressionExecutors, null, matchingStreamIndex, inputDefinition);
     }
 
     @Override
-    protected void restoreState(Object[] data) {
-        window.restoreState(data);
+    public void start() {
+        //Do nothing
     }
 
     @Override
-    protected void init(Expression[] parameters, QueryPostProcessingElement nextProcessor, AbstractDefinition streamDefinition, String elementId, boolean async, SiddhiContext siddhiContext) {
-        lengthToKeep = ((IntConstant) parameters[0]).getValue();
-
-        if (this.siddhiContext.isDistributedProcessingEnabled()) {
-            window = new SiddhiQueueGrid<StreamEvent>(elementId, this.siddhiContext, this.async);
-        } else {
-            window = new SiddhiQueue<StreamEvent>();
-        }
-
+    public void stop() {
+        //Do nothing
     }
 
     @Override
-    public void destroy(){
-
+    public Object[] currentState() {
+        return new Object[]{expiredEventChunk, count};
     }
 
+    @Override
+    public void restoreState(Object[] state) {
+        expiredEventChunk = (ComplexEventChunk<StreamEvent>) state[0];
+        count = (Integer) state[1];
+    }
 }

@@ -1,23 +1,20 @@
 /*
- * Copyright (c) 2005 - 2014, WSO2 Inc. (http://www.wso2.org)
- * All Rights Reserved.
+ * Copyright (c) 2005 - 2015, WSO2 Inc. (http://www.wso2.org) All Rights Reserved.
  *
- * WSO2 Inc. licenses this file to you under the Apache License,
- * Version 2.0 (the "License"); you may not use this file except
- * in compliance with the License.
- * You may obtain a copy of the License at
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy
+ * of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Unless required by applicable law or agreed to in writing, software distributed
+ * under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
+ * CONDITIONS OF ANY KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations under the License.
  */
 package org.wso2.siddhi.performance;
 
+import org.wso2.siddhi.core.ExecutionPlanRuntime;
 import org.wso2.siddhi.core.SiddhiManager;
 import org.wso2.siddhi.core.event.Event;
 import org.wso2.siddhi.core.stream.input.InputHandler;
@@ -31,26 +28,33 @@ public class SimpleFilterMultipleQueryPerformance {
         SiddhiManager siddhiManager = new SiddhiManager();
 
         String cseEventStream = " define stream cseEventStream (symbol string, price float, volume int);";
-        String query1 = "from cseEventStream[70 > price] select symbol,price,volume insert into outputStream ;";
-        String query2 = "from cseEventStream[volume > 90] select symbol,price,volume insert into outputStream ;";
+        String query1 = "@info(name = 'query1') from cseEventStream[70 > price] select symbol,price,volume insert into outputStream ;";
+        String query2 = "@info(name = 'query2') from cseEventStream[volume > 90] select symbol,price,volume insert into outputStream ;";
 
-        siddhiManager.defineStream(cseEventStream);
-        siddhiManager.addQuery(query1);
-        siddhiManager.addQuery(query2);
-        siddhiManager.addCallback("outputStream", new StreamCallback() {
+        ExecutionPlanRuntime executionPlanRuntime = siddhiManager.createExecutionPlanRuntime(cseEventStream + query1 + query2);
+
+        executionPlanRuntime.addCallback("outputStream", new StreamCallback() {
+            private long chunk = 0;
+            private long prevCount = 0;
+
             @Override
-            public void receive(Event[] events) {
-                count++;
-                if (count % 1000000 == 0) {
+            public void receive(Event[] inEvents) {
+                count += inEvents.length;
+                long currentChunk = count / 2000000;
+                if (currentChunk != chunk) {
                     long end = System.currentTimeMillis();
-                    double tp = (1000000 * 1000.0 / (end - start));
+                    double tp = ((count - prevCount) * 1000.0 / (end - start));
                     System.out.println("Throughput = " + tp + " Event/sec");
                     start = end;
+                    chunk = currentChunk;
+                    prevCount = count;
                 }
             }
+
         });
 
-        InputHandler inputHandler = siddhiManager.getInputHandler("cseEventStream");
+        InputHandler inputHandler = executionPlanRuntime.getInputHandler("cseEventStream");
+        executionPlanRuntime.start();
         while (true) {
             inputHandler.send(new Object[]{"WSO2", 55.6f, 100});
             inputHandler.send(new Object[]{"IBM", 75.6f, 100});

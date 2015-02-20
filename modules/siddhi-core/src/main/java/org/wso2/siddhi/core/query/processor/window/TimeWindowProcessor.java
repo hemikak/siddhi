@@ -1,233 +1,161 @@
 /*
-*  Copyright (c) 2005-2010, WSO2 Inc. (http://www.wso2.org) All Rights Reserved.
-*
-*  WSO2 Inc. licenses this file to you under the Apache License,
-*  Version 2.0 (the "License"); you may not use this file except
-*  in compliance with the License.
-*  You may obtain a copy of the License at
-*
-*    http://www.apache.org/licenses/LICENSE-2.0
-*
-* Unless required by applicable law or agreed to in writing,
-* software distributed under the License is distributed on an
-* "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-* KIND, either express or implied.  See the License for the
-* specific language governing permissions and limitations
-* under the License.
-*/
+ * Copyright (c) 2005 - 2015, WSO2 Inc. (http://www.wso2.org) All Rights Reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy
+ * of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software distributed
+ * under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
+ * CONDITIONS OF ANY KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations under the License.
+ */
 package org.wso2.siddhi.core.query.processor.window;
 
-import org.apache.log4j.Logger;
-import org.wso2.siddhi.core.config.SiddhiContext;
-import org.wso2.siddhi.core.event.AtomicEvent;
-import org.wso2.siddhi.core.event.ListEvent;
-import org.wso2.siddhi.core.event.StreamEvent;
-import org.wso2.siddhi.core.event.in.InEvent;
-import org.wso2.siddhi.core.event.in.InListEvent;
-import org.wso2.siddhi.core.event.remove.RemoveEvent;
-import org.wso2.siddhi.core.event.remove.RemoveListEvent;
-import org.wso2.siddhi.core.event.remove.RemoveStream;
-import org.wso2.siddhi.core.snapshot.ThreadBarrier;
-import org.wso2.siddhi.core.query.QueryPostProcessingElement;
-import org.wso2.siddhi.core.util.EventConverter;
-import org.wso2.siddhi.core.util.collection.queue.TimeStampSiddhiQueue;
-import org.wso2.siddhi.core.util.collection.queue.scheduler.timestamp.ISchedulerTimestampSiddhiQueue;
-import org.wso2.siddhi.core.util.collection.queue.scheduler.timestamp.SchedulerTimestampSiddhiQueue;
-import org.wso2.siddhi.core.util.collection.queue.scheduler.timestamp.SchedulerTimestampSiddhiQueueGrid;
-import org.wso2.siddhi.query.api.definition.AbstractDefinition;
+import org.wso2.siddhi.core.config.ExecutionPlanContext;
+import org.wso2.siddhi.core.event.ComplexEvent;
+import org.wso2.siddhi.core.event.ComplexEventChunk;
+import org.wso2.siddhi.core.event.MetaComplexEvent;
+import org.wso2.siddhi.core.event.stream.StreamEvent;
+import org.wso2.siddhi.core.event.stream.StreamEventCloner;
+import org.wso2.siddhi.core.executor.ConstantExpressionExecutor;
+import org.wso2.siddhi.core.executor.ExpressionExecutor;
+import org.wso2.siddhi.core.executor.VariableExpressionExecutor;
+import org.wso2.siddhi.core.query.processor.Processor;
+import org.wso2.siddhi.core.query.processor.SchedulingProcessor;
+import org.wso2.siddhi.core.table.EventTable;
+import org.wso2.siddhi.core.util.Scheduler;
+import org.wso2.siddhi.core.util.finder.Finder;
+import org.wso2.siddhi.core.util.parser.SimpleFinderParser;
+import org.wso2.siddhi.query.api.definition.Attribute;
+import org.wso2.siddhi.query.api.exception.ExecutionPlanValidationException;
 import org.wso2.siddhi.query.api.expression.Expression;
-import org.wso2.siddhi.query.api.expression.constant.IntConstant;
-import org.wso2.siddhi.query.api.expression.constant.LongConstant;
 
-import java.util.Collection;
-import java.util.Iterator;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
+import java.util.List;
+import java.util.Map;
 
-public class TimeWindowProcessor extends WindowProcessor implements RunnableWindowProcessor {
+public class TimeWindowProcessor extends WindowProcessor implements SchedulingProcessor, FindableProcessor {
 
-    static final Logger log = Logger.getLogger(TimeWindowProcessor.class);
-    private ScheduledExecutorService eventRemoverScheduler;
-    private long timeToKeep;
-    private long constantSchedulingInterval = -1;
-    private boolean isConstantSchedulingMode = false;
-    private ThreadBarrier threadBarrier;
-    private ISchedulerTimestampSiddhiQueue<StreamEvent> window;
+    private long timeInMilliSeconds;
+    private ComplexEventChunk<StreamEvent> expiredEventChunk;
+    private Scheduler scheduler;
+    private ExecutionPlanContext executionPlanContext;
 
-    @Override
-    public void processEvent(InEvent event) {
-        acquireLock();
-        try {
-            window.put(new RemoveEvent(event, System.currentTimeMillis() + timeToKeep));
-            nextProcessor.process(event);
-        } finally {
-            releaseLock();
-        }
+    public void setTimeInMilliSeconds(long timeInMilliSeconds) {
+        this.timeInMilliSeconds = timeInMilliSeconds;
     }
 
+    @Override
+    public void setScheduler(Scheduler scheduler) {
+        this.scheduler = scheduler;
+    }
 
     @Override
-    public void processEvent(InListEvent listEvent) {
-        acquireLock();
-        try {
-            if (!async && siddhiContext.isDistributedProcessingEnabled()) {
-                long expireTime = System.currentTimeMillis() + timeToKeep;
-                for (int i = 0, activeEvents = listEvent.getActiveEvents(); i < activeEvents; i++) {
-                    window.put(new RemoveEvent(listEvent.getEvent(i), expireTime));
+    public Scheduler getScheduler() {
+        return scheduler;
+    }
+
+    @Override
+    protected void init(ExpressionExecutor[] attributeExpressionExecutors, ExecutionPlanContext executionPlanContext) {
+        this.executionPlanContext = executionPlanContext;
+        this.expiredEventChunk = new ComplexEventChunk<StreamEvent>();
+        if (attributeExpressionExecutors.length == 1) {
+            if (attributeExpressionExecutors[0] instanceof ConstantExpressionExecutor) {
+                if (attributeExpressionExecutors[0].getReturnType() == Attribute.Type.INT) {
+                    timeInMilliSeconds = (Integer) ((ConstantExpressionExecutor) attributeExpressionExecutors[0]).getValue();
+
+                } else if (attributeExpressionExecutors[0].getReturnType() == Attribute.Type.LONG) {
+                    timeInMilliSeconds = (Long) ((ConstantExpressionExecutor) attributeExpressionExecutors[0]).getValue();
+                } else {
+                    throw new ExecutionPlanValidationException("Time window's parameter attribute should be either int or long, but found " + attributeExpressionExecutors[0].getReturnType());
                 }
             } else {
-                window.put(new RemoveListEvent(EventConverter.toRemoveEventArray(listEvent.getEvents(), listEvent.getActiveEvents(), System.currentTimeMillis() + timeToKeep)));
+                throw new ExecutionPlanValidationException("Time window should have constant parameter attribute but found a dynamic attribute " + attributeExpressionExecutors[0].getClass().getCanonicalName());
             }
-            nextProcessor.process(listEvent);
-        } finally {
-            releaseLock();
-        }
-    }
-
-    @Override
-    public Iterator<StreamEvent> iterator() {
-        return window.iterator();
-    }
-
-    @Override
-    public Iterator<StreamEvent> iterator(String predicate) {
-        if (siddhiContext.isDistributedProcessingEnabled()) {
-            return ((SchedulerTimestampSiddhiQueueGrid<StreamEvent>) window).iterator(predicate);
         } else {
-            return window.iterator();
+            throw new ExecutionPlanValidationException("Time window should only have one parameter (timeInterval int), but found " + attributeExpressionExecutors.length + " input attributes");
         }
     }
 
     @Override
-    public void run() {
-        acquireLock();
-        try {
-            while (true) {
-                threadBarrier.pass();
-                StreamEvent streamEvent = window.peek();
-                try {
-                    if (streamEvent == null) {
-                        break;
-                    }
-                    long timeDiff = ((RemoveStream) streamEvent).getExpiryTime() - System.currentTimeMillis();
-                    try {
-                            if (timeDiff > 0) {
-                                if (!isConstantSchedulingMode){
-                                    if (siddhiContext.isDistributedProcessingEnabled()) {
-                                        //should not use sleep as it will not release the lock, hence it will fail in distributed case
-                                        eventRemoverScheduler.schedule(this, timeDiff, TimeUnit.MILLISECONDS);
-                                        break;
-                                    } else {
-                                        //this cannot be used for distributed case as it will course concurrency issues
-                                        releaseLock();
-                                        Thread.sleep(timeDiff);
-                                        acquireLock();
-                                    }
-                                }else {
-                                    break;
-                                }
-                            }
+    protected void process(ComplexEventChunk<StreamEvent> streamEventChunk, Processor nextProcessor, StreamEventCloner streamEventCloner) {
+        while (streamEventChunk.hasNext()) {
 
-                        Collection<StreamEvent> resultList = window.poll(System.currentTimeMillis());
-                        if (resultList != null){
-                            for (StreamEvent event : resultList) {
-                                if (streamEvent instanceof AtomicEvent) {
-                                    nextProcessor.process((AtomicEvent) event);
-                                } else {
-                                    nextProcessor.process((ListEvent) event);
-                                }
-                            }
-                        }
-                    } catch (InterruptedException e) {
-                        log.warn("Time window sleep interrupted at elementId " + elementId);
-                    }
-                } catch (Throwable e) {
-                    e.printStackTrace();
+            StreamEvent streamEvent = streamEventChunk.next();
+            long currentTime = executionPlanContext.getTimestampGenerator().currentTime();
+
+            StreamEvent clonedEvent = null;
+            if (streamEvent.getType() == StreamEvent.Type.CURRENT) {
+                clonedEvent = streamEventCloner.copyStreamEvent(streamEvent);
+                clonedEvent.setType(StreamEvent.Type.EXPIRED);
+                clonedEvent.setTimestamp(currentTime + timeInMilliSeconds);
+            }
+
+            boolean eventScheduled = false;
+            while (expiredEventChunk.hasNext()) {
+                StreamEvent expiredEvent = expiredEventChunk.next();
+                long timeDiff = expiredEvent.getTimestamp() - currentTime;
+                if (timeDiff <= 0) {
+                    expiredEventChunk.remove();
+                    streamEventChunk.insertBeforeCurrent(expiredEvent);
+                } else {
+                    scheduler.notifyAt(expiredEvent.getTimestamp());
+                    expiredEventChunk.reset();
+                    eventScheduled = true;
+                    break;
                 }
             }
-        } catch (Throwable t) {
-            log.error(t.getMessage(), t);
-        } finally {
-            // If this is constant scheduling, reschedule after every execution since
-            // arrival of events won't do any scheduling
-            if (isConstantSchedulingMode){
-                this.scheduleConstantTime();
+
+            if (streamEvent.getType() == StreamEvent.Type.CURRENT) {
+                this.expiredEventChunk.add(clonedEvent);
+                if (!eventScheduled) {
+                    scheduler.notifyAt(clonedEvent.getTimestamp());
+                }
             }
-            releaseLock();
+            expiredEventChunk.reset();
         }
+        nextProcessor.process(streamEventChunk);
     }
 
     @Override
-    protected Object[] currentState() {
-        return window.currentState();
-    }
-
-    @Override
-    protected void restoreState(Object[] data) {
-        window.restoreState(data);
-
-        if (!isConstantSchedulingMode){
-            window.reSchedule();
-        }
-    }
-
-    @Override
-    protected void init(Expression[] parameters, QueryPostProcessingElement nextProcessor, AbstractDefinition streamDefinition, String elementId, boolean async, SiddhiContext siddhiContext) {
-        if (parameters[0] instanceof IntConstant) {
-            timeToKeep = ((IntConstant) parameters[0]).getValue();
-        } else {
-            timeToKeep = ((LongConstant) parameters[0]).getValue();
-        }
-
-        if (parameters.length  == 2){
-            constantSchedulingInterval = ((IntConstant) parameters[1]).getValue();
-            if (constantSchedulingInterval > 0){
-                isConstantSchedulingMode = true;
+    public StreamEvent find(ComplexEvent matchingEvent, Finder finder) {
+        finder.setMatchingEvent(matchingEvent);
+        ComplexEventChunk<StreamEvent> returnEventChunk = new ComplexEventChunk<StreamEvent>();
+        expiredEventChunk.reset();
+        while (expiredEventChunk.hasNext()) {
+            StreamEvent streamEvent = expiredEventChunk.next();
+            if (finder.execute(streamEvent)) {
+                returnEventChunk.add(streamEventCloner.copyStreamEvent(streamEvent));
             }
         }
-
-        if (!isConstantSchedulingMode){
-            if (this.siddhiContext.isDistributedProcessingEnabled()) {
-                window = new SchedulerTimestampSiddhiQueueGrid<StreamEvent>(elementId, this, this.siddhiContext, this.async);
-            } else {
-                window = new SchedulerTimestampSiddhiQueue<StreamEvent>(this);
-            }
-        }else{
-            if (this.siddhiContext.isDistributedProcessingEnabled()) {
-                throw new UnsupportedOperationException("Constant time sliding not supported for distributed processing.");
-                //TODO : Implement constant time sliding window grid for distributed case
-            }else{
-                window = new TimeStampSiddhiQueue<StreamEvent>(constantSchedulingInterval);
-                this.schedule();
-            }
-        }
-
-    }
-
-    public void scheduleNow() {
-        eventRemoverScheduler.execute(this);
-    }
-
-    public void schedule() {
-        eventRemoverScheduler.schedule(this, timeToKeep, TimeUnit.MILLISECONDS);
-    }
-
-    public void scheduleConstantTime(){
-        eventRemoverScheduler.schedule(this, constantSchedulingInterval, TimeUnit.MILLISECONDS);
+        finder.setMatchingEvent(null);
+        return returnEventChunk.getFirst();
     }
 
     @Override
-    public void setScheduledExecutorService(ScheduledExecutorService scheduledExecutorService) {
-        eventRemoverScheduler = scheduledExecutorService;
-    }
-
-    public void setThreadBarrier(ThreadBarrier threadBarrier) {
-        this.threadBarrier = threadBarrier;
+    public Finder constructFinder(Expression expression, MetaComplexEvent metaComplexEvent, ExecutionPlanContext executionPlanContext, List<VariableExpressionExecutor> variableExpressionExecutors, Map<String, EventTable> eventTableMap, int matchingStreamIndex) {
+        return SimpleFinderParser.parse(expression, metaComplexEvent, executionPlanContext, variableExpressionExecutors, eventTableMap, matchingStreamIndex, inputDefinition);
     }
 
     @Override
-    public void destroy(){
+    public void start() {
+        //Do nothing
+    }
 
+    @Override
+    public void stop() {
+        //Do nothing
+    }
+
+    @Override
+    public Object[] currentState() {
+        return new Object[]{expiredEventChunk};
+    }
+
+    @Override
+    public void restoreState(Object[] state) {
+        expiredEventChunk = (ComplexEventChunk<StreamEvent>) state[0];
     }
 }
-

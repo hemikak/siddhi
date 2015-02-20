@@ -1,51 +1,39 @@
 /*
-*  Copyright (c) 2005-2013, WSO2 Inc. (http://www.wso2.org) All Rights Reserved.
-*
-*  WSO2 Inc. licenses this file to you under the Apache License,
-*  Version 2.0 (the "License"); you may not use this file except
-*  in compliance with the License.
-*  You may obtain a copy of the License at
-*
-*    http://www.apache.org/licenses/LICENSE-2.0
-*
-* Unless required by applicable law or agreed to in writing,
-* software distributed under the License is distributed on an
-* "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-* KIND, either express or implied.  See the License for the
-* specific language governing permissions and limitations
-* under the License.
-*/
+ * Copyright (c) 2005 - 2015, WSO2 Inc. (http://www.wso2.org) All Rights Reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy
+ * of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software distributed
+ * under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
+ * CONDITIONS OF ANY KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations under the License.
+ */
+
 package org.wso2.siddhi.core.table;
 
-import org.wso2.siddhi.core.config.SiddhiContext;
-import org.wso2.siddhi.core.event.AtomicEvent;
-import org.wso2.siddhi.core.event.StreamEvent;
-import org.wso2.siddhi.core.executor.conditon.ConditionExecutor;
+import org.wso2.siddhi.core.event.ComplexEvent;
+import org.wso2.siddhi.core.event.ComplexEventChunk;
+import org.wso2.siddhi.core.event.stream.StreamEvent;
+import org.wso2.siddhi.core.util.finder.Finder;
+import org.wso2.siddhi.core.query.processor.window.FindableProcessor;
 import org.wso2.siddhi.query.api.definition.TableDefinition;
-import org.wso2.siddhi.query.api.query.QueryEventSource;
 
-import java.util.Iterator;
+/**
+ * Created on 1/18/15.
+ */
+public interface EventTable extends FindableProcessor {
+    TableDefinition getTableDefinition();
 
-public interface EventTable {
+    void add(ComplexEventChunk<StreamEvent> addingEventChunk);
 
+    void delete(ComplexEventChunk<StreamEvent> deletingEventChunk, Finder finder);
 
-    public TableDefinition getTableDefinition();
+    void update(ComplexEventChunk<StreamEvent> updatingEventChunk, Finder finder, int[] mappingPosition);
 
-    public void init(TableDefinition tableDefinition, SiddhiContext siddhiContext);
+    boolean contains(ComplexEvent matchingEvent, Finder finder);
 
-    public void add(StreamEvent streamEvent);
-
-    public void delete(StreamEvent streamEvent, ConditionExecutor conditionExecutor);
-
-    public void update(StreamEvent streamEvent, ConditionExecutor conditionExecutor, int[] attributeUpdateMappingPosition);
-
-    public boolean contains(AtomicEvent atomicEvent, ConditionExecutor conditionExecutor);
-
-    public QueryEventSource getQueryEventSource();
-
-    public Iterator<StreamEvent> iterator();
-
-    public Iterator<StreamEvent> iterator(String sqlPredicate);
-
-    public Iterator<StreamEvent> iterator(StreamEvent event, ConditionExecutor conditionExecutor);
 }

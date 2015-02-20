@@ -1,241 +1,144 @@
 /*
-*  Copyright (c) 2005-2013, WSO2 Inc. (http://www.wso2.org) All Rights Reserved.
-*
-*  WSO2 Inc. licenses this file to you under the Apache License,
-*  Version 2.0 (the "License"); you may not use this file except
-*  in compliance with the License.
-*  You may obtain a copy of the License at
-*
-*    http://www.apache.org/licenses/LICENSE-2.0
-*
-* Unless required by applicable law or agreed to in writing,
-* software distributed under the License is distributed on an
-* "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-* KIND, either express or implied.  See the License for the
-* specific language governing permissions and limitations
-* under the License.
-*/
+ * Copyright (c) 2005 - 2015, WSO2 Inc. (http://www.wso2.org) All Rights Reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ * use this file except in compliance with the License. You may obtain a copy
+ * of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software distributed
+ * under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
+ * CONDITIONS OF ANY KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations under the License.
+ */
+
 package org.wso2.siddhi.core.table;
 
-import org.apache.log4j.Logger;
-import org.wso2.siddhi.core.config.SiddhiContext;
-import org.wso2.siddhi.core.event.*;
-import org.wso2.siddhi.core.event.in.InStateEvent;
-import org.wso2.siddhi.core.event.remove.RemoveEvent;
-import org.wso2.siddhi.core.executor.conditon.ConditionExecutor;
-import org.wso2.siddhi.core.snapshot.SnapshotObject;
-import org.wso2.siddhi.core.snapshot.Snapshotable;
-import org.wso2.siddhi.core.util.collection.list.SiddhiList;
-import org.wso2.siddhi.core.util.collection.list.SiddhiListGrid;
+import org.wso2.siddhi.core.config.ExecutionPlanContext;
+import org.wso2.siddhi.core.event.ComplexEvent;
+import org.wso2.siddhi.core.event.ComplexEventChunk;
+import org.wso2.siddhi.core.event.MetaComplexEvent;
+import org.wso2.siddhi.core.event.stream.MetaStreamEvent;
+import org.wso2.siddhi.core.event.stream.StreamEvent;
+import org.wso2.siddhi.core.event.stream.StreamEventCloner;
+import org.wso2.siddhi.core.event.stream.StreamEventPool;
+import org.wso2.siddhi.core.executor.VariableExpressionExecutor;
+import org.wso2.siddhi.core.util.finder.Finder;
+import org.wso2.siddhi.core.util.parser.SimpleFinderParser;
+import org.wso2.siddhi.query.api.definition.Attribute;
 import org.wso2.siddhi.query.api.definition.TableDefinition;
-import org.wso2.siddhi.query.api.query.QueryEventSource;
+import org.wso2.siddhi.query.api.expression.Expression;
 
-import java.util.ArrayList;
 import java.util.Iterator;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Map;
 
-public class InMemoryEventTable implements EventTable, Snapshotable {
-    static final Logger log = Logger.getLogger(InMemoryEventTable.class);
+/**
+ * Created on 1/18/15.
+ */
+public class InMemoryEventTable implements EventTable {
 
-    private TableDefinition tableDefinition;
-    private SiddhiList<StreamEvent> list;
-    private QueryEventSource queryEventSource;
-    private String elementId;
-    private final boolean enableRemoveAndAdd;
+    private final TableDefinition tableDefinition;
+    private final ExecutionPlanContext executionPlanContext;
+    private final LinkedList<StreamEvent> list = new LinkedList<StreamEvent>();
+    private final StreamEventCloner streamEventCloner;
+    private final StreamEventPool streamEventPool;
 
 
-    public InMemoryEventTable(TableDefinition tableDefinition, SiddhiContext siddhiContext) {
-        elementId = siddhiContext.getElementIdGenerator().createNewId();
+    public InMemoryEventTable(TableDefinition tableDefinition, ExecutionPlanContext executionPlanContext) {
+
         this.tableDefinition = tableDefinition;
-        this.queryEventSource = new QueryEventSource(tableDefinition.getTableId(), tableDefinition.getTableId(), tableDefinition, null, null, null);
-        if (siddhiContext.isDistributedProcessingEnabled()) {
-            enableRemoveAndAdd = true;
-            this.list = new SiddhiListGrid<StreamEvent>(elementId, siddhiContext);
-        } else {
-            enableRemoveAndAdd = false;
-            this.list = new SiddhiList<StreamEvent>();
+        this.executionPlanContext = executionPlanContext;
+        MetaStreamEvent metaStreamEvent = new MetaStreamEvent();
+        metaStreamEvent.addInputDefinition(tableDefinition);
+        for (Attribute attribute : tableDefinition.getAttributeList()) {
+            metaStreamEvent.addOutputData(attribute);
         }
-
-    }
-
-    public void init(TableDefinition tableDefinition, SiddhiContext siddhiContext) {
-
-    }
-
-    public synchronized void add(StreamEvent streamEvent) {
-        if (streamEvent instanceof AtomicEvent) {
-            list.add(new RemoveEvent((Event) streamEvent, Long.MAX_VALUE));
-        } else {
-            for (int i = 0, size = ((ListEvent) streamEvent).getActiveEvents(); i < size; i++) {
-                list.add(new RemoveEvent((Event) ((ListEvent) streamEvent).getEvent(i), Long.MAX_VALUE));
-            }
-        }
-        if (log.isTraceEnabled()) {
-            log.trace("list " + elementId + " size " + list.size());
-        }
-    }
-
-    public synchronized void delete(StreamEvent streamEvent, ConditionExecutor conditionExecutor) {
-        if (conditionExecutor != null) {
-            if (streamEvent instanceof AtomicEvent) {
-                Iterator<StreamEvent> iterator = list.iterator();
-                StateEvent stateEvent = new InStateEvent(new StreamEvent[]{streamEvent, null});
-                while (iterator.hasNext()) {
-                    StreamEvent tableStreamEvent = iterator.next();
-                    stateEvent.setStreamEvent(1, tableStreamEvent);
-                    if (conditionExecutor.execute(stateEvent)) {
-                        iterator.remove();
-                    }
-                }
-            } else {
-                Iterator<StreamEvent> iterator = list.iterator();
-                StateEvent stateEvent = new InStateEvent(new StreamEvent[2]);
-                for (int i = 0, size = ((ListEvent) streamEvent).getActiveEvents(); i < size; i++) {
-                    stateEvent.setStreamEvent(0, ((ListEvent) streamEvent).getEvent(i));
-                    while (iterator.hasNext()) {
-                        StreamEvent tableStreamEvent = iterator.next();
-                        stateEvent.setStreamEvent(1, tableStreamEvent);
-                        if (conditionExecutor.execute(stateEvent)) {
-                            iterator.remove();
-                        }
-                    }
-                }
-            }
-        } else {
-            list.clear();
-        }
-        if (log.isTraceEnabled()) {
-            log.trace("list " + elementId + " size " + list.size());
-        }
-    }
-
-    public synchronized void update(StreamEvent streamEvent, ConditionExecutor conditionExecutor, int[] attributeUpdateMappingPosition) {
-        Iterator<StreamEvent> iterator = list.iterator();
-        StateEvent stateEvent = new InStateEvent(new StreamEvent[2]);
-        ArrayList<RemoveEvent> toAddRemoveEventList = null;
-        if (enableRemoveAndAdd) {
-            toAddRemoveEventList = new ArrayList<RemoveEvent>();
-        }
-        if (streamEvent instanceof AtomicEvent) {
-            stateEvent.setStreamEvent(0, streamEvent);
-            while (iterator.hasNext()) {
-                StreamEvent tableStreamEvent = iterator.next();
-                stateEvent.setStreamEvent(1, tableStreamEvent);
-                if (conditionExecutor != null) {
-                    if (conditionExecutor.execute(stateEvent)) {
-                        for (int i = 0, size = attributeUpdateMappingPosition.length; i < size; i++) {
-                            ((RemoveEvent) tableStreamEvent).getData()[attributeUpdateMappingPosition[i]] = ((Event) streamEvent).getData()[i];
-                        }
-                        if (enableRemoveAndAdd) {
-                            iterator.remove();
-                            toAddRemoveEventList.add((RemoveEvent) tableStreamEvent);
-                        }
-                    }
-                } else {
-                    for (int i = 0, size = attributeUpdateMappingPosition.length; i < size; i++) {
-                        ((RemoveEvent) tableStreamEvent).getData()[attributeUpdateMappingPosition[i]] = ((Event) streamEvent).getData()[i];
-                    }
-                    if (enableRemoveAndAdd) {
-                        iterator.remove();
-                        toAddRemoveEventList.add((RemoveEvent) tableStreamEvent);
-                    }
-                }
-            }
-        } else {
-            while (iterator.hasNext()) {
-                StreamEvent tableStreamEvent = iterator.next();
-                stateEvent.setStreamEvent(1, tableStreamEvent);
-                for (int i = 0, size = ((ListEvent) streamEvent).getActiveEvents(); i < size; i++) {
-                    stateEvent.setStreamEvent(0, ((ListEvent) streamEvent).getEvent(i));
-                    if (conditionExecutor != null) {
-                        if (conditionExecutor.execute(stateEvent)) {
-                            for (int i1 = 0, size1 = attributeUpdateMappingPosition.length; i1 < size1; i1++) {
-                                ((RemoveEvent) tableStreamEvent).getData()[attributeUpdateMappingPosition[i1]] = ((Event) stateEvent.getEvent0()).getData()[i1];
-                            }
-                            if (enableRemoveAndAdd) {
-                                iterator.remove();
-                                toAddRemoveEventList.add((RemoveEvent) tableStreamEvent);
-                            }
-                        }
-                    } else {
-                        for (int i1 = 0, size1 = attributeUpdateMappingPosition.length; i1 < size1; i1++) {
-                            ((RemoveEvent) tableStreamEvent).getData()[attributeUpdateMappingPosition[i1]] = ((Event) streamEvent).getData()[i1];
-                        }
-                        if (enableRemoveAndAdd) {
-                            iterator.remove();
-                            toAddRemoveEventList.add((RemoveEvent) tableStreamEvent);
-                        }
-                    }
-                }
-            }
-        }
-        if (enableRemoveAndAdd) {
-            for (RemoveEvent removeEvent : toAddRemoveEventList) {
-                list.add(removeEvent);
-            }
-        }
-        if (log.isTraceEnabled()) {
-            log.trace("list " + elementId + " size " + list.size());
-        }
-    }
-
-
-    public synchronized boolean contains(AtomicEvent atomicEvent, ConditionExecutor conditionExecutor) {
-        if (conditionExecutor != null) {
-            Iterator<StreamEvent> iterator = list.iterator();
-            StateEvent stateEvent = new InStateEvent(new StreamEvent[]{(StreamEvent) atomicEvent, null});
-            while (iterator.hasNext()) {
-                StreamEvent tableStreamEvent = iterator.next();
-                stateEvent.setStreamEvent(1, tableStreamEvent);
-                if (conditionExecutor.execute(stateEvent)) {
-                    return true;
-                }
-            }
-        }
-        return false;
+        streamEventPool = new StreamEventPool(metaStreamEvent, 10);
+        streamEventCloner = new StreamEventCloner(metaStreamEvent, streamEventPool);
     }
 
     @Override
-    public QueryEventSource getQueryEventSource() {
-        return queryEventSource;
-    }
-
-    @Override
-    public Iterator<StreamEvent> iterator() {
-        return new ArrayList<StreamEvent>(list.getList()).iterator();
-    }
-
-    @Override
-    public Iterator<StreamEvent> iterator(String SQLPredicate) {
-        return list.iterator();
-    }
-
-    @Override
-    public Iterator<StreamEvent> iterator(StreamEvent event, ConditionExecutor conditionExecutor) {
-        return list.iterator();
-    }
-
-
     public TableDefinition getTableDefinition() {
         return tableDefinition;
     }
 
-    @Override
-    public SnapshotObject snapshot() {
-        return new SnapshotObject(list.currentState());
+    public synchronized void add(ComplexEventChunk<StreamEvent> addingEventChunk) {
+        addingEventChunk.reset();
+        while (addingEventChunk.hasNext()) {
+            StreamEvent streamEvent = addingEventChunk.next();
+            list.add(streamEventCloner.copyStreamEvent(streamEvent));
+        }
     }
 
-    @Override
-    public void restore(SnapshotObject snapshotObject) {
-        list.restoreState((Object[]) snapshotObject.getData()[0]);
+    public synchronized void delete(ComplexEventChunk<StreamEvent> deletingEventChunk, Finder finder) {
+
+        deletingEventChunk.reset();
+        while (deletingEventChunk.hasNext()) {
+            StreamEvent matchStreamEvent = deletingEventChunk.next();
+            finder.setMatchingEvent(matchStreamEvent);
+            Iterator<StreamEvent> iterator = list.iterator();
+            while (iterator.hasNext()) {
+                StreamEvent streamEvent = iterator.next();
+                if (finder.execute(streamEvent)) {
+                    iterator.remove();
+                }
+            }
+            finder.setMatchingEvent(null);
+        }
+
+
     }
 
-    @Override
-    public String getElementId() {
-        return elementId;
+    public synchronized void update(ComplexEventChunk<StreamEvent> updatingEventChunk, Finder finder, int[] mappingPosition) {
+
+        updatingEventChunk.reset();
+        while (updatingEventChunk.hasNext()) {
+            StreamEvent matchStreamEvent = updatingEventChunk.next();
+            finder.setMatchingEvent(matchStreamEvent);
+            Iterator<StreamEvent> iterator = list.iterator();
+            while (iterator.hasNext()) {
+                StreamEvent streamEvent = iterator.next();
+                if (finder.execute(streamEvent)) {
+                    for (int i = 0, size = mappingPosition.length; i < size; i++) {
+                        streamEvent.setOutputData(matchStreamEvent.getOutputData()[i], mappingPosition[i]);
+                    }
+                }
+            }
+            finder.setMatchingEvent(null);
+        }
+
     }
 
-    @Override
-    public void setElementId(String elementId) {
-        this.elementId = elementId;
+
+    public synchronized boolean contains(ComplexEvent matchingEvent, Finder finder) {
+        finder.setMatchingEvent(matchingEvent);
+        for (StreamEvent streamEvent : list) {
+            if (finder.execute(streamEvent)) {
+                return true;
+            }
+        }
+        finder.setMatchingEvent(null);
+        return false;
     }
+
+    public synchronized StreamEvent find(ComplexEvent matchingEvent, Finder finder) {    //todo optimize
+        finder.setMatchingEvent(matchingEvent);
+        ComplexEventChunk<StreamEvent> returnEventChunk = new ComplexEventChunk<StreamEvent>();
+        for (StreamEvent streamEvent : list) {
+            if (finder.execute(streamEvent)) {
+                returnEventChunk.add(streamEventCloner.copyStreamEvent(streamEvent));
+            }
+        }
+        finder.setMatchingEvent(null);
+        return returnEventChunk.getFirst();
+    }
+
+    public Finder constructFinder(Expression expression, MetaComplexEvent metaComplexEvent, ExecutionPlanContext executionPlanContext, List<VariableExpressionExecutor> variableExpressionExecutors, Map<String, EventTable> eventTableMap, int matchingStreamIndex) {
+        return SimpleFinderParser.parse(expression, metaComplexEvent, executionPlanContext, variableExpressionExecutors, eventTableMap, matchingStreamIndex, tableDefinition);
+
+    }
+
 }
